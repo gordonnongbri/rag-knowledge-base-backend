@@ -1,85 +1,101 @@
-import fitz  # PyMuPDF
-import openai
-import os
-from sqlalchemy.orm import Session
-from sqlalchemy import text
+from functools import lru_cache
 
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+import pymupdf
+from sentence_transformers import SentenceTransformer
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # outputs 384-dim vectors
+CHUNK_WORDS = 200    # MiniLM truncates input at ~256 tokens, so keep chunks under that
+OVERLAP_WORDS = 40
+
+
+@lru_cache
+def get_model() -> SentenceTransformer:
+    # Loaded once on first use. The first run downloads ~90MB.
+    return SentenceTransformer(EMBEDDING_MODEL)
+
 
 def parse_pdf(file_bytes: bytes) -> str:
     """Extract raw text from PDF bytes."""
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    return "\n".join(page.get_text() for page in doc)
+    doc = pymupdf.open(stream=file_bytes, filetype="pdf")
+    return "\n\n".join(page.get_text() for page in doc)
 
-def chunk_text(text: str, chunk_size: int = 512, overlap: int = 64) -> list[str]:
-    """
-    Semantic chunking: split on paragraphs first,
-    then enforce token budget with overlap for context continuity.
-    """
-    # Split on double newlines (paragraph boundaries) first
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    
-    chunks = []
-    current = []
-    current_len = 0
 
+def chunk_text(
+    raw: str,
+    chunk_words: int = CHUNK_WORDS,
+    overlap: int = OVERLAP_WORDS,
+) -> list[str]:
+    """
+    Paragraph-aware chunking: pack whole paragraphs into a chunk until the
+    word budget is hit, split oversized paragraphs, and carry an overlap
+    into the next chunk so context isn't cut mid-thought.
+    """
+    paragraphs = [p.strip() for p in raw.split("\n\n") if p.strip()]
+
+    # Break any single paragraph that exceeds the budget on its own
+    units: list[list[str]] = []
     for para in paragraphs:
         words = para.split()
-        if current_len + len(words) > chunk_size:
-            if current:
-                chunks.append(" ".join(current))
-            # Start next chunk with overlap from end of previous
-            current = current[-overlap:] + words
-            current_len = len(current)
-        else:
-            current.extend(words)
-            current_len += len(words)
+        for i in range(0, len(words), chunk_words):
+            units.append(words[i : i + chunk_words])
+
+    chunks: list[str] = []
+    current: list[str] = []
+
+    for words in units:
+        if current and len(current) + len(words) > chunk_words:
+            chunks.append(" ".join(current))
+            current = current[-overlap:]  # carry the tail forward
+        current.extend(words)
 
     if current:
         chunks.append(" ".join(current))
 
     return chunks
 
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Batch embed text chunks using OpenAI embeddings."""
-    response = client.embeddings.create(
-        model="text-embedding-3-small",  # 1536 dims, cheap and fast
-        input=texts
+    """Embed a batch of strings locally. Used for both chunks and queries."""
+    vectors = get_model().encode(
+        texts,
+        normalize_embeddings=True,  # makes cosine distance behave well
+        batch_size=32,
+        show_progress_bar=False,
     )
-    return [item.embedding for item in response.data]
+    return vectors.tolist()
+
 
 def ingest_document(filename: str, file_bytes: bytes, db: Session) -> dict:
-    """Full ingestion pipeline: parse → chunk → embed → store."""
-    # 1. Parse
+    """Full pipeline: parse -> chunk -> embed -> store."""
     raw_text = parse_pdf(file_bytes)
-    
-    # 2. Chunk
     chunks = chunk_text(raw_text)
-    
-    # 3. Embed (batch for efficiency)
-    embeddings = embed_texts(chunks)
-    
-    # 4. Store document record
-    result = db.execute(
-        text("INSERT INTO documents (filename) VALUES (:f) RETURNING id"),
-        {"f": filename}
-    )
-    doc_id = result.fetchone()[0]
-    
-    # 5. Store chunks + embeddings
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        db.execute(
-            text("""
-                INSERT INTO chunks (document_id, content, chunk_index, embedding)
-                VALUES (:doc_id, :content, :idx, :emb)
-            """),
-            {
-                "doc_id": doc_id,
-                "content": chunk,
-                "idx": i,
-                "emb": str(embedding)  # pgvector accepts list as string
-            }
+
+    if not chunks:
+        raise ValueError(
+            "No extractable text found. The PDF may be a scanned image."
         )
-    
+
+    embeddings = embed_texts(chunks)
+
+    doc_id = db.execute(
+        text("INSERT INTO documents (filename) VALUES (:f) RETURNING id"),
+        {"f": filename},
+    ).scalar_one()
+
+    db.execute(
+        text(
+            """
+            INSERT INTO chunks (document_id, content, chunk_index, embedding)
+            VALUES (:doc_id, :content, :idx, CAST(:emb AS vector))
+            """
+        ),
+        [
+            {"doc_id": doc_id, "content": c, "idx": i, "emb": str(e)}
+            for i, (c, e) in enumerate(zip(chunks, embeddings))
+        ],
+    )
+
     db.commit()
     return {"document_id": doc_id, "chunks": len(chunks), "filename": filename}

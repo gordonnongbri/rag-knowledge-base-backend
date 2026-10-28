@@ -1,8 +1,16 @@
-import anthropic
 import os
+from functools import lru_cache
 from typing import AsyncIterator
+from google import genai
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+@lru_cache
+def get_client() -> genai.Client:
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY is not set in backend/.env")
+    return genai.Client(api_key=key)
+
 
 def build_prompt(query: str, chunks: list[dict]) -> str:
     context = "\n\n---\n\n".join(c["content"] for c in chunks)
@@ -18,14 +26,12 @@ def build_prompt(query: str, chunks: list[dict]) -> str:
 
 Answer:"""
 
+
 async def stream_answer(query: str, chunks: list[dict]) -> AsyncIterator[str]:
-    """Stream the LLM response using Anthropic's streaming API."""
-    prompt = build_prompt(query, chunks)
-    
-    with client.messages.stream(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
-    ) as stream:
-        for text_chunk in stream.text_stream:
-            yield text_chunk
+    stream = get_client().models.generate_content_stream(
+        model="gemini-3.8-flash",  # check AI Studio for the current model name
+        contents=build_prompt(query, chunks),
+    )
+    for chunk in stream:
+        if chunk.text:
+            yield chunk.text

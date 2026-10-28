@@ -1,11 +1,19 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
-engine = create_engine(os.getenv("DATABASE_URL"))
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        f"DATABASE_URL not set. Expected a .env file at "
+        f"{Path(__file__).resolve().parent / '.env'}"
+    )
+
+engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
 def init_db():
@@ -24,7 +32,7 @@ def init_db():
                 document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
                 content TEXT NOT NULL,
                 chunk_index INTEGER NOT NULL,
-                embedding vector(1536)   -- OpenAI ada-002 dims; adjust for other models
+                embedding vector(384)   -- OpenAI ada-002 dims; adjust for other models
             )
         """))
         conn.execute(text("""
