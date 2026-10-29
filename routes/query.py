@@ -18,11 +18,14 @@ async def query_knowledge_base(request: QueryRequest, db = Depends(get_db)):
     
     async def event_stream():
 
-        yield f"data: {json.dumps({'type': 'sources', 'chunks': chunks})}\n\n"
-        
-        async for token in stream_answer(request.question, chunks):
-            yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
-        
+        async def event_stream():
+            yield f"data: {json.dumps({'type': 'sources', 'chunks': chunks})}\n\n"
+        try:
+            async for token in stream_answer(request.question, chunks):
+                yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+        except Exception:
+            msg = "The model is busy right now. Please try again in a moment."
+            yield f"data: {json.dumps({'type': 'error', 'message': msg})}\n\n"
         yield "data: [DONE]\n\n"
     
     return StreamingResponse(

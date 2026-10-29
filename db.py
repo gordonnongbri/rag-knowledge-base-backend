@@ -32,13 +32,12 @@ def init_db():
                 document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
                 content TEXT NOT NULL,
                 chunk_index INTEGER NOT NULL,
-                embedding vector(384)   -- OpenAI ada-002 dims; adjust for other models
+                embedding vector(384)   -- sentence-transformers/all-MiniLM-L6-v2 produces 384-dimensional embeddings
             )
         """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS chunks_embedding_idx
-            ON chunks USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100)
+            ON chunks USING hnsw (embedding vector_cosine_ops)
         """))
         conn.commit()
 
