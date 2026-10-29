@@ -28,10 +28,13 @@ Answer:"""
 
 
 async def stream_answer(query: str, chunks: list[dict]) -> AsyncIterator[str]:
-    stream = get_client().models.generate_content_stream(
-        model="gemini-3.8-flash",  # check AI Studio for the current model name
+    stream = await get_client().aio.models.generate_content_stream(
+        model="gemini-3.8-flash",
         contents=build_prompt(query, chunks),
+        config=genai.types.GenerateContentConfig(
+            thinking_config=genai.types.ThinkingConfig(thinking_budget=0)
+        ),
     )
-    for chunk in stream:
+    async for chunk in stream:
         if chunk.text:
             yield chunk.text
